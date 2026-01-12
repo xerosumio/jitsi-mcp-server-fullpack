@@ -1,16 +1,16 @@
 // Jest setup file
 import { jest } from '@jest/globals';
 
-// Set test timeout
+// Mock console to reduce noise in tests
+global.console = {
+  ...console,
+  log: jest.fn(),
+  debug: jest.fn(),
+  info: jest.fn(),
+  warn: jest.fn(),
+  // Keep error for debugging
+  error: console.error,
+};
+
+// Increase timeout for async operations
 jest.setTimeout(10000);
-
-// Mock environment variables for tests
-process.env.JITSI_SERVER_URL = 'https://meet.jit.si';
-process.env.JITSI_DISPLAY_NAME = 'Test Bot';
-process.env.RECORDINGS_DIR = './test-recordings';
-process.env.HEADLESS = 'true';
-
-// Clean up after each test
-afterEach(() => {
-  jest.clearAllMocks();
-});

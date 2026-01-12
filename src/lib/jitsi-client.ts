@@ -189,12 +189,29 @@ export class JitsiClient extends EventEmitter {
   private async setupChatObserver(): Promise<void> {
     if (!this.page || this.chatObserverSetup) return;
 
+    // First, open chat and enter nickname if required
+    // Use keyboard shortcut to open chat
+    await this.page.keyboard.press('c');
+    await new Promise(r => setTimeout(r, 1000));
+
+    // Check if nickname input exists and fill it
+    const hasNicknameInput = await this.page.evaluate(() => {
+      const input = document.querySelector('input[placeholder*="nickname" i], input[placeholder*="Choose" i]') as HTMLInputElement;
+      return !!input;
+    });
+
+    if (hasNicknameInput) {
+      console.log('[JitsiClient] Chat requires nickname, entering...');
+      // Type the nickname using keyboard
+      await this.page.keyboard.type(config.displayName);
+      await new Promise(r => setTimeout(r, 300));
+      // Press Enter to submit
+      await this.page.keyboard.press('Enter');
+      await new Promise(r => setTimeout(r, 1000));
+      console.log('[JitsiClient] Chat nickname entered');
+    }
+
     await this.page.evaluate(() => {
-      // Open chat panel if not open
-      const chatButton = document.querySelector('[aria-label="Open chat"], [aria-label="Chat"], button[id*="chat"]') as HTMLElement;
-      if (chatButton) {
-        chatButton.click();
-      }
 
       // Set up mutation observer for chat messages
       const observeChat = () => {
@@ -405,73 +422,207 @@ export class JitsiClient extends EventEmitter {
     const filename = `recording-${this.state.roomName}-${timestamp}.${config.recordingFormat}`;
     const filepath = join(config.recordingsDir, filename);
 
-    // Use Chrome's screen capture API via CDP
-    const client = await this.page.createCDPSession();
+    // Hook into RTCPeerConnection to capture all remote audio streams
+    const recordingStarted = await this.page.evaluate(() => {
+      return new Promise<boolean>((resolve) => {
+        try {
+          const audioContext = new AudioContext();
+          const destination = audioContext.createMediaStreamDestination();
+          let tracksConnected = 0;
 
-    // Start screen recording using Page.startScreencast
-    await client.send('Page.startScreencast', {
-      format: 'png',
-      quality: 80,
-      maxWidth: 1920,
-      maxHeight: 1080,
+          // Find all RTCPeerConnections and get their remote streams
+          const pcs = (window as any).__peerConnections || [];
+
+          // Also try to find via Jitsi's internal state
+          const app = (window as any).APP;
+          if (app?.conference?._room?.rtc?.peerConnections) {
+            const jitsiPCs = Object.values(app.conference._room.rtc.peerConnections);
+            jitsiPCs.forEach((pcWrapper: any) => {
+              if (pcWrapper?.peerconnection) {
+                pcs.push(pcWrapper.peerconnection);
+              }
+            });
+          }
+
+          // Get remote streams from each PeerConnection
+          pcs.forEach((pc: RTCPeerConnection) => {
+            try {
+              const receivers = pc.getReceivers();
+              receivers.forEach((receiver) => {
+                if (receiver.track && receiver.track.kind === 'audio') {
+                  const stream = new MediaStream([receiver.track]);
+                  const source = audioContext.createMediaStreamSource(stream);
+                  source.connect(destination);
+                  tracksConnected++;
+                  console.log('[Recording] Connected audio receiver track');
+                }
+              });
+            } catch (e) {
+              console.log('[Recording] Error with PC:', e);
+            }
+          });
+
+          // Also check all video elements
+          const videos = document.querySelectorAll('video');
+          videos.forEach((video) => {
+            const stream = video.srcObject as MediaStream;
+            if (stream) {
+              stream.getAudioTracks().forEach((track) => {
+                try {
+                  const trackStream = new MediaStream([track]);
+                  const source = audioContext.createMediaStreamSource(trackStream);
+                  source.connect(destination);
+                  tracksConnected++;
+                  console.log('[Recording] Connected audio from video element');
+                } catch (e) {
+                  // Track might already be connected
+                }
+              });
+            }
+          });
+
+          // Check audio elements too
+          const audios = document.querySelectorAll('audio');
+          audios.forEach((audio) => {
+            const stream = audio.srcObject as MediaStream;
+            if (stream) {
+              try {
+                const source = audioContext.createMediaStreamSource(stream);
+                source.connect(destination);
+                tracksConnected++;
+                console.log('[Recording] Connected audio element');
+              } catch (e) {
+                // Already connected
+              }
+            }
+          });
+
+          console.log('[Recording] Total tracks connected:', tracksConnected);
+
+          // Create MediaRecorder
+          const stream = destination.stream;
+          const mediaRecorder = new MediaRecorder(stream, {
+            mimeType: 'audio/webm;codecs=opus',
+          });
+
+          const chunks: Blob[] = [];
+          mediaRecorder.ondataavailable = (e) => {
+            if (e.data.size > 0) {
+              chunks.push(e.data);
+              console.log('[Recording] Got chunk:', e.data.size, 'bytes');
+            }
+          };
+
+          // Store on window for later access
+          (window as any).__jitsiRecording = {
+            mediaRecorder,
+            chunks,
+            audioContext,
+            tracksConnected,
+          };
+
+          mediaRecorder.start(1000); // Capture in 1-second chunks
+          console.log('[Recording] MediaRecorder started with', tracksConnected, 'tracks');
+          resolve(true);
+        } catch (error) {
+          console.error('[Recording] Failed to start:', error);
+          resolve(false);
+        }
+      });
     });
 
-    // Store the CDP client for later
+    if (!recordingStarted) {
+      throw new Error('Failed to start recording');
+    }
+
+    // Store recording info
     this.recordingStream = {
-      client,
+      client: null as any,
       filepath,
-      frames: [] as Buffer[],
+      frames: [],
       startTime: Date.now(),
     };
-
-    // Handle incoming frames
-    client.on('Page.screencastFrame', async (frame) => {
-      if (this.recordingStream) {
-        const buffer = Buffer.from(frame.data, 'base64');
-        this.recordingStream.frames.push(buffer);
-        await client.send('Page.screencastFrameAck', { sessionId: frame.sessionId });
-      }
-    });
 
     this.state.isRecording = true;
     this.state.recordingPath = filepath;
 
-    console.log(`[JitsiClient] Started recording to: ${filepath}`);
+    console.log(`[JitsiClient] Started audio recording to: ${filepath}`);
     this.emit('recordingStarted', { filepath });
 
     return filepath;
   }
 
   async stopRecording(): Promise<string | null> {
-    if (!this.state.isRecording || !this.recordingStream) {
+    if (!this.state.isRecording || !this.recordingStream || !this.page) {
       return null;
     }
 
-    const { client, filepath, frames } = this.recordingStream;
+    const { filepath, startTime } = this.recordingStream;
 
-    // Stop the screencast
-    await client.send('Page.stopScreencast');
+    console.log(`[JitsiClient] Stopping recording...`);
 
-    // Write frames to a file (in production, you'd use ffmpeg to create a video)
-    // For now, we'll save the raw frames info
+    // Stop recording and get audio data from the browser
+    const audioDataBase64 = await this.page.evaluate(() => {
+      return new Promise<string | null>((resolve) => {
+        const recording = (window as any).__jitsiRecording;
+        if (!recording) {
+          resolve(null);
+          return;
+        }
+
+        const { mediaRecorder, chunks, audioContext } = recording;
+
+        mediaRecorder.onstop = async () => {
+          // Combine all chunks into a single blob
+          const blob = new Blob(chunks, { type: 'audio/webm' });
+
+          // Convert to base64
+          const reader = new FileReader();
+          reader.onloadend = () => {
+            const base64 = (reader.result as string).split(',')[1];
+            resolve(base64);
+          };
+          reader.readAsDataURL(blob);
+
+          // Cleanup
+          audioContext.close();
+          delete (window as any).__jitsiRecording;
+        };
+
+        mediaRecorder.stop();
+      });
+    });
+
     const { writeFile } = await import('fs/promises');
 
-    // Create a simple metadata file with frame count
+    if (!audioDataBase64) {
+      console.log(`[JitsiClient] No audio data captured`);
+      this.recordingStream = null;
+      this.state.isRecording = false;
+      this.state.recordingPath = null;
+      return null;
+    }
+
+    // Write audio file
+    const audioBuffer = Buffer.from(audioDataBase64, 'base64');
+    await writeFile(filepath, audioBuffer);
+
+    const duration = (Date.now() - startTime) / 1000;
+    console.log(`[JitsiClient] Saved audio recording (${duration.toFixed(1)}s, ${(audioBuffer.length / 1024).toFixed(1)} KB)`);
+
+    // Save metadata
     const metadata = {
       filepath,
-      frameCount: frames.length,
-      duration: Date.now() - this.recordingStream.startTime,
-      format: config.recordingFormat,
+      duration: Date.now() - startTime,
+      size: audioBuffer.length,
+      format: 'webm',
+      codec: 'opus',
     };
 
     await writeFile(
-      filepath.replace(`.${config.recordingFormat}`, '.json'),
+      filepath.replace('.webm', '.json'),
       JSON.stringify(metadata, null, 2)
     );
-
-    // In production, you would pipe frames through ffmpeg here
-    // For now, save frames as a tar-like concatenation or use a proper video encoder
-    console.log(`[JitsiClient] Recorded ${frames.length} frames`);
 
     this.recordingStream = null;
     this.state.isRecording = false;

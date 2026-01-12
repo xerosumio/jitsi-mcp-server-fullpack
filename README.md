@@ -26,20 +26,8 @@ This server uses Puppeteer to control a headless Chrome browser that joins Jitsi
 
 ## Prerequisites
 
-- Node.js 20+
+- Node.js 18+
 - Chrome/Chromium (installed automatically by Puppeteer)
-- FFmpeg (for video recording)
-
-```bash
-# macOS
-brew install ffmpeg
-
-# Ubuntu/Debian
-sudo apt-get install ffmpeg
-
-# Windows (with chocolatey)
-choco install ffmpeg
-```
 
 ## Installation
 
@@ -205,11 +193,26 @@ For self-hosted Jitsi with JWT authentication:
 2. Set `JITSI_JWT_APP_ID` and `JITSI_JWT_SECRET` in `.env`
 3. The server will automatically generate JWTs for joining meetings
 
+## Important Notes
+
+### Audio Recording
+Audio recording captures remote participants' audio via WebRTC. For reliable audio capture:
+- Set `HEADLESS=false` in your `.env` file
+- The browser needs a real audio context to capture WebRTC streams
+
+### Jitsi Server Compatibility
+- **meet.jit.si**: Works with anonymous users if a logged-in moderator starts the meeting first
+- **Self-hosted**: Full anonymous access typically available
+- **Alternative servers**: Tested with meet.ffmuc.net and others
+
+### Chat
+The bot automatically enters a chat nickname when required by the Jitsi interface.
+
 ## Limitations
 
-- **Audio Recording**: Due to browser security, capturing remote participants' audio requires additional setup (using Jibri or a dedicated audio capture solution)
-- **Video Quality**: Recording quality depends on browser rendering and CPU
-- **Private Messages**: Currently only public chat is supported
+- **Headless Audio**: Audio recording may not work reliably in headless mode
+- **Video Recording**: Currently audio-only; video frames are not captured
+- **Private Messages**: Only public chat is supported
 
 ## Development
 
@@ -217,8 +220,14 @@ For self-hosted Jitsi with JWT authentication:
 # Run in development mode with hot reload
 npm run dev
 
+# Run HTTP server in dev mode
+npm run dev:http
+
 # Build
 npm run build
+
+# Run tests
+npm test
 
 # Lint
 npm run lint
