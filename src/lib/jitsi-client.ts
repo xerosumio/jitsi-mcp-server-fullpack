@@ -99,6 +99,9 @@ export class JitsiClient extends EventEmitter {
       `config.startWithVideoMuted=${startWithVideoOff}`,
       `config.disableDeepLinking=true`,
       `config.disableInviteFunctions=true`,
+      `config.enableLobby=false`,
+      `config.hideLobbyButton=true`,
+      `config.requireDisplayName=false`,
       `userInfo.displayName=${encodeURIComponent(displayName)}`,
     ].join('&');
 
@@ -126,16 +129,55 @@ export class JitsiClient extends EventEmitter {
   private async waitForMeetingLoad(): Promise<void> {
     if (!this.page) return;
 
+    // Wait for the page to load initially
+    await new Promise(resolve => setTimeout(resolve, 3000));
+
+    // Check if we're on the prejoin page and click the join button
+    const clickedPrejoin = await this.page.evaluate(() => {
+      // Look for prejoin page elements
+      const prejoinSelectors = [
+        '[data-testid="prejoin.joinMeeting"]',
+        'button[aria-label*="Join meeting"]',
+        '.prejoin-preview-dropdown-btn',
+        'button:has-text("Join meeting")',
+        // More generic - button containing "Join"
+      ];
+
+      for (const selector of prejoinSelectors) {
+        const btn = document.querySelector(selector) as HTMLElement;
+        if (btn) {
+          btn.click();
+          return true;
+        }
+      }
+
+      // Try finding any button with "Join" text
+      const buttons = Array.from(document.querySelectorAll('button'));
+      for (const btn of buttons) {
+        if (btn.textContent?.toLowerCase().includes('join meeting')) {
+          btn.click();
+          return true;
+        }
+      }
+
+      return false;
+    });
+
+    if (clickedPrejoin) {
+      console.log('[JitsiClient] Clicked prejoin button, waiting for meeting...');
+      await new Promise(resolve => setTimeout(resolve, 5000));
+    }
+
     // Wait for the main Jitsi interface to load
     // Try multiple selectors as Jitsi UI can vary
     try {
       await this.page.waitForSelector(
-        '[class*="toolbox"], [class*="Toolbox"], #meetingContainer, .meeting-app',
+        '[class*="toolbox"], [class*="Toolbox"], #meetingContainer, .meeting-app, .videocontainer',
         { timeout: 30000 }
       );
 
       // Give it a moment to fully initialize
-      await new Promise(resolve => setTimeout(resolve, 3000));
+      await new Promise(resolve => setTimeout(resolve, 2000));
 
       console.log('[JitsiClient] Meeting interface loaded');
     } catch (error) {
