@@ -237,52 +237,75 @@ export class JitsiClient extends EventEmitter {
       throw new Error('Not connected to a meeting');
     }
 
-    await this.page.evaluate(async (msg: string) => {
-      // Try to open chat if not open
-      const chatButton = document.querySelector('[aria-label="Open chat"], [aria-label="Chat"], button[id*="chat"]') as HTMLElement;
-      if (chatButton) {
-        const chatPanel = document.querySelector('[class*="chat-panel"], .chat-panel, #chatconversation');
-        if (!chatPanel || (chatPanel as HTMLElement).offsetParent === null) {
-          chatButton.click();
-          await new Promise(r => setTimeout(r, 500));
+    // Use Jitsi's keyboard shortcut 'c' to open/toggle chat panel
+    // This is more reliable than trying to find and click buttons
+    await this.page.keyboard.press('c');
+
+    // Wait for chat panel to open
+    await new Promise(r => setTimeout(r, 1500));
+
+    // Try to find and focus the chat input
+    const chatInputFound = await this.page.evaluate(() => {
+      // Try multiple selectors for the chat input
+      const chatInputSelectors = [
+        '#usermsg',
+        'textarea[placeholder*="message" i]',
+        'input[placeholder*="message" i]',
+        '[class*="chat"] textarea',
+        '[class*="Chat"] textarea',
+        '[class*="chat"] input[type="text"]',
+        '[id*="chat"] textarea',
+        '.chat-input textarea',
+        '.chat-input input',
+        // More specific Jitsi selectors
+        '[data-testid="chat-input"]',
+        '.chatroom textarea',
+        '.chatroom input',
+      ];
+
+      for (const selector of chatInputSelectors) {
+        const input = document.querySelector(selector) as HTMLInputElement | HTMLTextAreaElement;
+        if (input) {
+          input.focus();
+          input.click();
+          return { found: true, selector };
         }
       }
 
-      // Find the chat input
-      const chatInput = document.querySelector(
-        'textarea[placeholder*="message"], input[placeholder*="message"], [class*="chat-input"] textarea, [class*="chat-input"] input, #usermsg'
-      ) as HTMLInputElement | HTMLTextAreaElement;
+      // Debug: find any visible textareas or inputs
+      const allTextareas = Array.from(document.querySelectorAll('textarea'));
+      const visibleTextareas = allTextareas.filter(t => {
+        const rect = t.getBoundingClientRect();
+        return rect.width > 0 && rect.height > 0;
+      });
 
-      if (!chatInput) {
-        throw new Error('Could not find chat input');
+      if (visibleTextareas.length > 0) {
+        visibleTextareas[0].focus();
+        visibleTextareas[0].click();
+        return { found: true, selector: 'visible-textarea-fallback' };
       }
 
-      // Focus and type the message
-      chatInput.focus();
-      chatInput.value = msg;
+      return { found: false, debugInfo: { textareas: allTextareas.length, visibleTextareas: visibleTextareas.length } };
+    });
 
-      // Trigger input event
-      chatInput.dispatchEvent(new Event('input', { bubbles: true }));
-      chatInput.dispatchEvent(new Event('change', { bubbles: true }));
+    if (!chatInputFound.found) {
+      console.log('[JitsiClient] Chat input debug:', chatInputFound);
+      throw new Error('Could not find chat input');
+    }
 
-      // Find and click send button or press Enter
-      const sendButton = document.querySelector(
-        '[aria-label="Send"], button[type="submit"], [class*="send-button"]'
-      ) as HTMLElement;
+    console.log(`[JitsiClient] Found chat input with: ${chatInputFound.selector}`);
 
-      if (sendButton) {
-        sendButton.click();
-      } else {
-        // Press Enter
-        chatInput.dispatchEvent(new KeyboardEvent('keydown', {
-          key: 'Enter',
-          code: 'Enter',
-          keyCode: 13,
-          which: 13,
-          bubbles: true,
-        }));
-      }
-    }, message);
+    // Small delay to ensure focus
+    await new Promise(r => setTimeout(r, 200));
+
+    // Type the message using Puppeteer's keyboard (more reliable)
+    await this.page.keyboard.type(message);
+
+    // Small delay before sending
+    await new Promise(r => setTimeout(r, 100));
+
+    // Press Enter to send
+    await this.page.keyboard.press('Enter');
 
     // Add to local state
     const chatMsg: ChatMessage = {
