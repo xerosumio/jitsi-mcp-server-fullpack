@@ -1,39 +1,37 @@
-# Jitsi MCP join sidecar (Puppeteer + Chromium) — HTTP/SSE entrypoint for MattermostBot Loomy.
-# Single stage on purpose: Puppeteer downloads Chrome into PUPPETEER_CACHE_DIR during `npm ci`,
-# and a multi-stage copy would drop that browser cache unless explicitly carried over.
-FROM node:22-bookworm-slim
+# Jitsi MCP join sidecar — HTTP/SSE entrypoint for MattermostBot Loomy.
+# Base on the official Puppeteer image: it already bundles Chrome + all system
+# libraries for the pinned puppeteer version, so we avoid a heavy apt layer
+# (which got OOM-killed on the Coolify build server) and guarantee a Chrome
+# that matches puppeteer 23.11.1 exactly.
+FROM ghcr.io/puppeteer/puppeteer:23.11.1
 
-# Chromium runtime libraries required by Puppeteer's bundled Chrome (headless).
-RUN apt-get update && apt-get install -y --no-install-recommends \
-      ca-certificates fonts-liberation curl \
-      libasound2 libatk-bridge2.0-0 libatk1.0-0 libcairo2 libcups2 \
-      libdbus-1-3 libdrm2 libexpat1 libgbm1 libglib2.0-0 libgtk-3-0 \
-      libnspr4 libnss3 libpango-1.0-0 libx11-6 libxcb1 libxcomposite1 \
-      libxdamage1 libxext6 libxfixes3 libxkbcommon0 libxrandr2 \
-    && rm -rf /var/lib/apt/lists/*
-
+USER root
 WORKDIR /app
 
-# Store Puppeteer's Chrome inside the image so it survives to runtime.
-ENV PUPPETEER_CACHE_DIR=/app/.cache/puppeteer
-
-# Install deps (postinstall pulls Chrome-for-Testing into PUPPETEER_CACHE_DIR).
-COPY package.json package-lock.json ./
-RUN npm ci
-
-# Build TypeScript -> dist/
-COPY tsconfig.json ./
-COPY src/ src/
-RUN npm run build
-
-# Runtime defaults (override in Coolify env as needed).
-ENV NODE_ENV=production \
+# Chrome already lives in the image's puppeteer cache — don't re-download it.
+# NB: NODE_ENV is set AFTER the build — setting it to production here would make
+# `npm ci` skip devDependencies (@types/*, typescript) and break `tsc`.
+ENV PUPPETEER_SKIP_DOWNLOAD=true \
+    PUPPETEER_CACHE_DIR=/home/pptruser/.cache/puppeteer \
     PORT=3000 \
     HOST=0.0.0.0 \
     HEADLESS=true \
     RECORDINGS_DIR=/app/recordings
 
+# Install deps incl. devDeps (Chrome download skipped) then build TypeScript -> dist/.
+COPY package.json package-lock.json ./
+RUN npm ci
+COPY tsconfig.json ./
+COPY src/ src/
+RUN npm run build
+
+ENV NODE_ENV=production
+
+# Recordings dir + hand ownership back to the sandbox user.
+RUN mkdir -p /app/recordings && chown -R pptruser:pptruser /app
+USER pptruser
+
 EXPOSE 3000
 
-# HTTP server exposes /sse (MCP) + /health — this is what JITSI_MCP_URL points at.
+# Serves /sse (MCP) + /health — what JITSI_MCP_URL points at.
 CMD ["node", "dist/http-server.js"]
