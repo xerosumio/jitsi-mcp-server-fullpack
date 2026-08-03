@@ -136,29 +136,37 @@ class JitsiHttpServer {
       });
     });
 
-    // SSE endpoint for MCP
+    // SSE endpoint for MCP. The transport generates its own sessionId and
+    // advertises it in the endpoint event (/message?sessionId=...); key the map
+    // by that same id so POST /message can find the matching transport.
     this.app.get('/sse', async (req, res) => {
-      const sessionId = `session-${Date.now()}`;
-      console.log(`[HTTP] New SSE connection: ${sessionId}`);
-
       const transport = new SSEServerTransport('/message', res);
-      this.transports.set(sessionId, transport);
+      this.transports.set(transport.sessionId, transport);
+      console.log(`[HTTP] New SSE connection: ${transport.sessionId}`);
 
       const server = this.createMcpServer();
-      await server.connect(transport);
 
-      req.on('close', () => {
-        console.log(`[HTTP] SSE connection closed: ${sessionId}`);
-        this.transports.delete(sessionId);
+      res.on('close', () => {
+        console.log(`[HTTP] SSE connection closed: ${transport.sessionId}`);
+        this.transports.delete(transport.sessionId);
         server.close();
       });
+
+      await server.connect(transport);
     });
 
-    // Message endpoint for SSE transport
+    // Message endpoint for SSE transport. Route the client's JSON-RPC POST to
+    // the matching transport so the MCP handshake and tool calls actually run —
+    // previously this was a stub that swallowed every message, hanging the
+    // handshake until the client timed out.
     this.app.post('/message', async (req, res) => {
-      // The SSE transport handles this internally
-      // This is a placeholder for the transport's message handling
-      res.status(200).send('OK');
+      const sessionId = String(req.query.sessionId ?? '');
+      const transport = this.transports.get(sessionId);
+      if (!transport) {
+        res.status(400).json({ error: `No active SSE session for sessionId "${sessionId}"` });
+        return;
+      }
+      await transport.handlePostMessage(req, res, req.body);
     });
 
     // Direct API endpoints (non-MCP)
